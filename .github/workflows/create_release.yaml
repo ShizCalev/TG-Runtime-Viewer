@@ -1,0 +1,87 @@
+name: Create Release
+
+env:
+  CI: true
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Extract version from Version.java
+      id: extract_version
+      run: |
+        $versionFile = "src/main/java/tgrv/Version.java"
+        Write-Host "Reading version from $versionFile"
+
+        $match = Select-String -Path $versionFile -Pattern 'CURRENT\s*=\s*"([^"]+)"'
+        if (-not $match) {
+          Write-Error "Could not read version from $versionFile"
+          exit 1
+        }
+
+        $version = $match.Matches[0].Groups[1].Value
+        Write-Host "Parsed version: $version"
+
+        "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    - name: Verify release does not already exist
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        $version = "${{ steps.extract_version.outputs.version }}"
+
+        Write-Host "Checking whether release/tag already exists for version $version..."
+
+        $releaseExists = gh release view $version --repo "${{ github.repository }}" 2>$null
+
+        if ($LASTEXITCODE -eq 0) {
+          Write-Error "Release already exists for version $version. Bump Version.java before creating a new release."
+          exit 1
+        }
+
+        $tagExists = git ls-remote --tags origin "refs/tags/$version"
+
+        if ($tagExists) {
+          Write-Error "Git tag already exists for version $version. Bump Version.java before creating a new release."
+          exit 1
+        }
+
+        Write-Host "No existing release or tag found for version $version."
+
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Build and package
+      run: .\package.ps1
+
+    - name: Add license to package
+      run: Copy-Item LICENSE "dist/TG Runtime Viewer/LICENSE.md"
+
+    - name: Create release zip
+      working-directory: dist/TG Runtime Viewer
+      run: 7z a -tzip "../../TG-Runtime-Viewer_${{ steps.extract_version.outputs.version }}.zip" *
+
+    - uses: ncipollo/release-action@v1
+      with:
+        artifacts: "TG-Runtime-Viewer_${{ steps.extract_version.outputs.version }}.zip"
+        token: ${{ secrets.GITHUB_TOKEN }}
+        tag: ${{ steps.extract_version.outputs.version }}
+        name: "${{ steps.extract_version.outputs.version }}"
+        draft: true
+        generateReleaseNotes: true
+        artifactErrorsFailBuild: true
